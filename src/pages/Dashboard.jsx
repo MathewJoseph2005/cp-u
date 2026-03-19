@@ -3,9 +3,10 @@ import axios from "axios";
 import { AuthContext } from "../context/AuthContext";
 import AnalysisModal from "../components/AnalysisModal";
 import CameraGrid from "../components/CameraGrid";
+import CapturedPhotosGallery from "../components/CapturedPhotosGallery";
 import FarmMap from "../components/FarmMap";
 import NodeSimulator from "../components/NodeSimulator";
-import { fetchAnalysisResults, supabase } from "../lib/supabase";
+import { buildApiUrl, fetchAnalysisResults } from "../lib/api";
 
 export default function Dashboard() {
   const { user, logout } = useContext(AuthContext);
@@ -30,8 +31,12 @@ export default function Dashboard() {
     let mounted = true;
 
     async function loadResults() {
+      if (!user?.phone) {
+        return;
+      }
+
       try {
-        const rows = await fetchAnalysisResults();
+        const rows = await fetchAnalysisResults(user.phone);
         if (mounted) {
           setAnalysisResults(Array.isArray(rows) ? rows : []);
         }
@@ -44,48 +49,16 @@ export default function Dashboard() {
 
     loadResults();
 
-    // Set up Supabase realtime subscription for INSERT and UPDATE events
-    const channel = supabase
-      .channel("table_changes")
-      .on(
-        "postgres_changes",
-        {
-          event: "*", // Subscribe to all events (INSERT, UPDATE, DELETE)
-          schema: "public",
-          table: "AnalysisResult",
-        },
-        (payload) => {
-          if (mounted) {
-            if (payload.eventType === "INSERT") {
-              // New record inserted - add to the beginning of the list
-              const newRecord = payload.new;
-              setAnalysisResults((prev) => [newRecord, ...prev]);
-            } else if (payload.eventType === "UPDATE") {
-              // Record updated - replace old record with updated one
-              const updatedRecord = payload.new;
-              setAnalysisResults((prev) =>
-                prev.map((record) =>
-                  record.id === updatedRecord.id ? updatedRecord : record
-                )
-              );
-            } else if (payload.eventType === "DELETE") {
-              // Record deleted - remove from list
-              const deletedId = payload.old.id;
-              setAnalysisResults((prev) =>
-                prev.filter((record) => record.id !== deletedId)
-              );
-            }
-          }
-        }
-      )
-      .subscribe();
+    // Poll for updates every 10 seconds (replaces Supabase realtime)
+    const pollInterval = setInterval(() => {
+      loadResults();
+    }, 10000);
 
     return () => {
       mounted = false;
-      // Unsubscribe from realtime events when component unmounts
-      supabase.removeChannel(channel);
+      clearInterval(pollInterval);
     };
-  }, []);
+  }, [user?.phone]);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -128,7 +101,7 @@ export default function Dashboard() {
     try {
       setLoading(true);
 
-      const response = await axios.post("/api/analyze/", formData, {
+      const response = await axios.post(buildApiUrl("/api/analyze/"), formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
@@ -192,6 +165,44 @@ export default function Dashboard() {
     [analysisResults]
   );
 
+  function getExportRecord(record) {
+    const ai = record?.ai_analysis && typeof record.ai_analysis === "object" ? record.ai_analysis : {};
+
+    return {
+      id: record?.id ?? null,
+      created_at: record?.created_at ?? null,
+      health_score: record?.health_score ?? null,
+      camera_number: record?.camera_number ?? null,
+      field_zone: record?.field_zone ?? null,
+      latitude: record?.latitude ?? null,
+      longitude: record?.longitude ?? null,
+      actions: record?.actions && typeof record.actions === "object" ? record.actions : {},
+      images: {
+        original_image_url: record?.original_image_url ?? null,
+        overlay_image_url: record?.overlay_image_url ?? null,
+      },
+      ai_analysis: {
+        provider: ai.provider ?? null,
+        model: ai.model ?? null,
+        is_field_image: typeof ai.is_field_image === "boolean" ? ai.is_field_image : null,
+        object_type: ai.object_type ?? null,
+        confidence: typeof ai.confidence === "number" ? ai.confidence : null,
+        summary: ai.summary ?? null,
+        farmer_guidance: Array.isArray(ai.farmer_guidance) ? ai.farmer_guidance : [],
+        maintenance_tips: Array.isArray(ai.maintenance_tips) ? ai.maintenance_tips : [],
+      },
+    };
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
   function handleExportJson() {
     if (!analysisResults.length) {
       setError("No analyzed data available to export.");
@@ -207,7 +218,7 @@ export default function Dashboard() {
         phone: user?.phone || null,
       },
       total_records: analysisResults.length,
-      records: analysisResults,
+      records: analysisResults.map(getExportRecord),
     };
 
     const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {
@@ -240,6 +251,19 @@ export default function Dashboard() {
               .join("; ")
           : "No actions";
 
+        const ai = record.ai_analysis && typeof record.ai_analysis === "object" ? record.ai_analysis : {};
+        const aiProvider = ai.provider || "N/A";
+        const aiDetection = typeof ai.is_field_image === "boolean"
+          ? (ai.is_field_image ? "Field" : "Non-field")
+          : "Unknown";
+        const aiSummary = ai.summary || "No AI summary";
+        const aiGuidance = Array.isArray(ai.farmer_guidance) && ai.farmer_guidance.length
+          ? ai.farmer_guidance.join(" | ")
+          : "No guidance";
+        const aiMaintenance = Array.isArray(ai.maintenance_tips) && ai.maintenance_tips.length
+          ? ai.maintenance_tips.join(" | ")
+          : "No maintenance tips";
+
         const location = record.field_zone
           || (record.latitude != null && record.longitude != null
             ? `${record.latitude}, ${record.longitude}`
@@ -247,11 +271,16 @@ export default function Dashboard() {
 
         return `
           <tr>
-            <td>${index + 1}</td>
-            <td>${record.health_score ?? "N/A"}</td>
-            <td>${record.camera_number ?? "N/A"}</td>
-            <td>${location}</td>
-            <td>${actions}</td>
+            <td>${escapeHtml(index + 1)}</td>
+            <td>${escapeHtml(record.health_score ?? "N/A")}</td>
+            <td>${escapeHtml(record.camera_number ?? "N/A")}</td>
+            <td>${escapeHtml(location)}</td>
+            <td>${escapeHtml(actions)}</td>
+            <td>${escapeHtml(aiProvider)}</td>
+            <td>${escapeHtml(aiDetection)}</td>
+            <td>${escapeHtml(aiSummary)}</td>
+            <td>${escapeHtml(aiGuidance)}</td>
+            <td>${escapeHtml(aiMaintenance)}</td>
           </tr>
         `;
       })
@@ -278,9 +307,9 @@ export default function Dashboard() {
         </head>
         <body>
           <h1>CropSight Analysis Report</h1>
-          <p>Exported at: ${new Date().toISOString()}</p>
-          <p>Exported by: ${user?.name || "N/A"} (${user?.phone || "N/A"})</p>
-          <p>Total records: ${analysisResults.length}</p>
+          <p>Exported at: ${escapeHtml(new Date().toISOString())}</p>
+          <p>Exported by: ${escapeHtml(user?.name || "N/A")} (${escapeHtml(user?.phone || "N/A")})</p>
+          <p>Total records: ${escapeHtml(analysisResults.length)}</p>
           <table>
             <thead>
               <tr>
@@ -289,6 +318,11 @@ export default function Dashboard() {
                 <th>Camera</th>
                 <th>Location / Zone</th>
                 <th>Actions</th>
+                <th>AI Provider</th>
+                <th>AI Detection</th>
+                <th>AI Summary</th>
+                <th>Farmer Guidance</th>
+                <th>Maintenance Tips</th>
               </tr>
             </thead>
             <tbody>
@@ -309,10 +343,30 @@ export default function Dashboard() {
     setShowModal(true);
   }
 
+  function handleFrameSaved(savedRecord) {
+    if (!savedRecord || typeof savedRecord !== "object") {
+      return;
+    }
+
+    setAnalysisResults((prev) => {
+      const existingIndex = prev.findIndex((item) => item.id === savedRecord.id);
+      if (existingIndex !== -1) {
+        const next = [...prev];
+        next[existingIndex] = savedRecord;
+        return next;
+      }
+      return [savedRecord, ...prev];
+    });
+
+    setActiveView("camera");
+    setSelectedRecord(savedRecord);
+  }
+
   if (showNodeSimulator) {
     return (
       <NodeSimulator
         user={user}
+        onFrameSaved={handleFrameSaved}
         onClose={() => setShowNodeSimulator(false)}
       />
     );
@@ -494,6 +548,17 @@ export default function Dashboard() {
                 >
                   📷 Camera View
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveView("captures")}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${
+                    activeView === "captures"
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-700 hover:bg-slate-200"
+                  }`}
+                >
+                  🖼️ All Captures
+                </button>
               </div>
             </div>
 
@@ -507,9 +572,14 @@ export default function Dashboard() {
                 onRecordSelect={handleRecordSelect}
                 autoFetch={false}
               />
-            ) : (
+            ) : activeView === "camera" ? (
               <CameraGrid
                 analysisResults={cameraRecords}
+                onRecordSelect={handleRecordSelect}
+              />
+            ) : (
+              <CapturedPhotosGallery
+                analysisResults={analysisResults}
                 onRecordSelect={handleRecordSelect}
               />
             )}

@@ -1,6 +1,7 @@
 import { useState, useContext } from "react";
 import { AuthContext } from "../context/AuthContext";
 import { Link, useNavigate } from "react-router-dom";
+import { buildApiUrl } from "../lib/api";
 
 export default function Signup() {
   const { login } = useContext(AuthContext);
@@ -33,7 +34,7 @@ export default function Signup() {
     setLoading(true);
     
     try {
-      const response = await fetch("/api/register/", {
+      const response = await fetch(buildApiUrl("/api/register/"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

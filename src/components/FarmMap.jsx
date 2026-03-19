@@ -1,42 +1,51 @@
 import { useEffect, useMemo, useState } from "react";
-import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
-import L from "leaflet";
-import { fetchAnalysisResults } from "../lib/supabase";
+import { CircleMarker, MapContainer, Popup, TileLayer } from "react-leaflet";
+import { buildApiUrl, fetchAnalysisResults } from "../lib/api";
 import "leaflet/dist/leaflet.css";
 
-const markerShadow = "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png";
+const AREA_COLORS = [
+  "#ef4444",
+  "#f97316",
+  "#eab308",
+  "#22c55e",
+  "#0ea5e9",
+  "#6366f1",
+  "#ec4899",
+  "#14b8a6",
+  "#84cc16",
+  "#f43f5e",
+];
 
-const redIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
-  shadowUrl: markerShadow,
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+function getImageUrl(url) {
+  const value = typeof url === "string" ? url.trim() : "";
+  if (!value) {
+    return "";
+  }
 
-const yellowIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png",
-  shadowUrl: markerShadow,
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+  if (/^https?:\/\//i.test(value) || value.startsWith("data:")) {
+    return value;
+  }
 
-const greenIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png",
-  shadowUrl: markerShadow,
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+  if (value.startsWith("/")) {
+    return buildApiUrl(value);
+  }
 
-function getMarkerIcon(score) {
-  if (score < 40) return redIcon;
-  if (score <= 70) return yellowIcon;
-  return greenIcon;
+  return buildApiUrl(`/${value}`);
+}
+
+function getAffectedPercentage(record) {
+  const redRatioRaw = record?.actions?.red_ratio;
+  const redRatio = Number(redRatioRaw);
+  if (Number.isFinite(redRatio)) {
+    return Math.max(0, Math.min(100, Math.round(redRatio * 100)));
+  }
+
+  const score = Number(record?.health_score);
+  if (Number.isFinite(score)) {
+    return Math.max(0, Math.min(100, Math.round(100 - score)));
+  }
+
+  return null;
 }
 
 export default function FarmMap({
@@ -90,12 +99,26 @@ export default function FarmMap({
     [analysisResults]
   );
 
+  const affectedAreas = useMemo(() => {
+    const sorted = [...validResults].sort((a, b) => {
+      const aTime = Date.parse(a?.created_at || "") || 0;
+      const bTime = Date.parse(b?.created_at || "") || 0;
+      return aTime - bTime;
+    });
+
+    return sorted.map((record, index) => ({
+      ...record,
+      areaIndex: index + 1,
+      areaColor: AREA_COLORS[index % AREA_COLORS.length],
+    }));
+  }, [validResults]);
+
   const center = useMemo(() => {
-    if (validResults.length > 0) {
-      return [validResults[0].latitude, validResults[0].longitude];
+    if (affectedAreas.length > 0) {
+      return [affectedAreas[0].latitude, affectedAreas[0].longitude];
     }
     return [20, 0];
-  }, [validResults]);
+  }, [affectedAreas]);
 
   return (
     <div className={`w-full ${mapHeightClassName} rounded-xl overflow-hidden border border-slate-200`}>
@@ -106,11 +129,23 @@ export default function FarmMap({
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {validResults.map((record) => (
-          <Marker
-            key={record.id}
-            position={[record.latitude, record.longitude]}
-            icon={getMarkerIcon(record.health_score ?? 0)}
+        {affectedAreas.map((record) => {
+          const isSelected = selectedMarker?.id === record.id;
+          const affectedPercentage = getAffectedPercentage(record);
+          const originalImageUrl = getImageUrl(record.original_image_url);
+          const overlayImageUrl = getImageUrl(record.overlay_image_url);
+
+          return (
+          <CircleMarker
+            key={record.id || `${record.latitude}-${record.longitude}-${record.areaIndex}`}
+            center={[record.latitude, record.longitude]}
+            radius={isSelected ? 12 : 9}
+            pathOptions={{
+              color: record.areaColor,
+              fillColor: record.areaColor,
+              fillOpacity: isSelected ? 0.9 : 0.65,
+              weight: isSelected ? 4 : 2,
+            }}
             eventHandlers={{
               click: () => {
                 setSelectedMarker(record);
@@ -121,18 +156,38 @@ export default function FarmMap({
             }}
           >
             <Popup>
-              <div className="text-sm">
-                <p className="font-semibold">Health: {record.health_score}</p>
+              <div className="text-sm space-y-2 min-w-[220px]">
+                <p className="font-semibold" style={{ color: record.areaColor }}>
+                  Affected Area {record.areaIndex}
+                </p>
+                <p>Health: {record.health_score ?? "N/A"}</p>
+                {affectedPercentage != null ? <p>Affected: {affectedPercentage}%</p> : null}
                 <p>
                   {record.latitude}, {record.longitude}
                 </p>
+                {record.field_zone ? <p>Zone: {record.field_zone}</p> : null}
+                {originalImageUrl ? (
+                  <img
+                    src={originalImageUrl}
+                    alt={`Affected area ${record.areaIndex}`}
+                    className="w-full h-28 object-cover rounded border border-slate-200"
+                  />
+                ) : null}
+                {overlayImageUrl ? (
+                  <img
+                    src={overlayImageUrl}
+                    alt={`Overlay for area ${record.areaIndex}`}
+                    className="w-full h-28 object-cover rounded border border-slate-200"
+                  />
+                ) : null}
                 {selectedMarker?.id === record.id ? (
                   <p className="text-emerald-700">Selected</p>
                 ) : null}
               </div>
             </Popup>
-          </Marker>
-        ))}
+          </CircleMarker>
+          );
+        })}
       </MapContainer>
     </div>
   );

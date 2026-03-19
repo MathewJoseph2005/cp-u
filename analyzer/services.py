@@ -1,6 +1,12 @@
 
 # pyright: reportMissingTypeStubs=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownReturnType=false
+import base64
+import json
 import os
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from io import BytesIO
 from typing import Any, BinaryIO
@@ -8,9 +14,23 @@ from typing import Any, BinaryIO
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+from django.conf import settings
 from PIL import ExifTags, Image
 from rest_framework.exceptions import ValidationError
 from supabase import create_client
+
+try:
+    from camb.client import CambAI as CambSDKClient, save_stream_to_file  # pyright: ignore[reportMissingImports]
+    from camb.types import StreamTtsOutputConfiguration  # pyright: ignore[reportMissingImports]
+except ImportError:
+    CambSDKClient = None
+    save_stream_to_file = None
+    StreamTtsOutputConfiguration = None
+
+try:
+    from cambai import CambAI as CambAIClient  # pyright: ignore[reportMissingImports]
+except ImportError:
+    CambAIClient = None
 
 
 def read_image(file: BinaryIO) -> NDArray[np.uint8]:
@@ -333,6 +353,230 @@ def upload_to_supabase(image_array: NDArray[np.uint8]) -> str:
     return url
 
 
+def save_image_locally(image_array: NDArray[np.uint8], subfolder: str = "uploads") -> str:
+    media_root = str(settings.MEDIA_ROOT)
+    upload_dir = os.path.join(media_root, subfolder)
+    os.makedirs(upload_dir, exist_ok=True)
+
+    file_name = f"{uuid.uuid4().hex}.jpg"
+    file_path = os.path.join(upload_dir, file_name)
+
+    success = cv2.imwrite(file_path, image_array)
+    if not success:
+        raise ValidationError("Failed to save image locally.")
+
+    return f"{settings.MEDIA_URL}{subfolder}/{file_name}"
+
+
+def _default_farmer_tips(health_score: int) -> tuple[list[str], list[str], str]:
+    if health_score >= 70:
+        summary = "Crop condition appears healthy in the mathematical analysis."
+        guidance = [
+            "Keep irrigation schedule consistent and avoid overwatering.",
+            "Maintain current nutrient plan with periodic soil checks.",
+            "Continue weekly scouting for early pest detection.",
+        ]
+    elif health_score >= 40:
+        summary = "Crop condition appears moderate and can be improved with timely intervention."
+        guidance = [
+            "Review irrigation uniformity and reduce dry stress spots.",
+            "Apply balanced nutrients based on soil and leaf status.",
+            "Inspect for weeds and early pest signs every 3-4 days.",
+        ]
+    else:
+        summary = "Crop condition appears weak and needs corrective action quickly."
+        guidance = [
+            "Check soil moisture and root zone immediately.",
+            "Run targeted nutrient correction, especially nitrogen and micronutrients.",
+            "Perform intensive pest and disease scouting and act early.",
+        ]
+
+    maintenance = [
+        "Record observations weekly and compare with image history.",
+        "Calibrate irrigation and spraying tools before field operations.",
+        "Remove visibly damaged plants/leaves to reduce disease spread.",
+    ]
+    return guidance, maintenance, summary
+
+
+def _fallback_ai_analysis(
+    mathematical_analysis: dict[str, Any],
+    camera_number: int | None,
+    field_zone: str | None,
+    latitude: float | None,
+    longitude: float | None,
+) -> dict[str, Any]:
+    health_score = int(mathematical_analysis.get("health_score", 0))
+    guidance, maintenance, summary = _default_farmer_tips(health_score)
+
+    if camera_number is not None or field_zone or (latitude is not None and longitude is not None):
+        object_type = "crop_field"
+        is_field_image = True
+        confidence = 0.55
+    else:
+        object_type = "unknown"
+        is_field_image = None
+        confidence = 0.2
+
+    return {
+        "provider": "local-fallback",
+        "model": None,
+        "is_field_image": is_field_image,
+        "object_type": object_type,
+        "confidence": confidence,
+        "summary": summary,
+        "farmer_guidance": guidance,
+        "maintenance_tips": maintenance,
+        "raw": None,
+    }
+
+
+def _extract_json_text(content: str) -> str:
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+    return text
+
+
+def _get_env_value(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+
+    # Some environments may carry accidental whitespace in env keys.
+    normalized_env = {key.strip(): value for key, value in os.environ.items()}
+    for name in names:
+        value = normalized_env.get(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def generate_grok_ai_analysis(
+    image_bytes: bytes,
+    mathematical_analysis: dict[str, Any],
+    camera_number: int | None,
+    field_zone: str | None,
+    latitude: float | None,
+    longitude: float | None,
+) -> dict[str, Any]:
+    api_key = _get_env_value(
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "XAI_API_KEY",
+    )
+    if not api_key:
+        return _fallback_ai_analysis(
+            mathematical_analysis,
+            camera_number,
+            field_zone,
+            latitude,
+            longitude,
+        )
+
+    model = _get_env_value("GEMINI_MODEL") or "gemini-1.5-flash"
+    base_url = _get_env_value("GEMINI_API_URL") or "https://generativelanguage.googleapis.com/v1beta/models"
+    endpoint = f"{base_url.rstrip('/')}/{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
+
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    context = {
+        "health_score": mathematical_analysis.get("health_score"),
+        "actions": mathematical_analysis.get("actions"),
+        "camera_number": camera_number,
+        "field_zone": field_zone,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    prompt = (
+        "You are an agronomy assistant. Analyze the image and combine your visual reasoning "
+        "with the provided mathematical crop metrics. Return ONLY valid JSON with keys: "
+        "is_field_image (boolean), object_type (string), confidence (0-1 number), summary (string), "
+        "farmer_guidance (array of strings), maintenance_tips (array of strings). "
+        "If image is not an agricultural field, explain object_type and provide safe generic advice. "
+        f"Context: {json.dumps(context)}"
+    )
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": encoded_image,
+                        }
+                    },
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=45) as response:
+            raw_payload = response.read().decode("utf-8")
+        parsed = json.loads(raw_payload)
+
+        content = (
+            parsed.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        content_json = json.loads(_extract_json_text(str(content)))
+
+        guidance = content_json.get("farmer_guidance")
+        maintenance = content_json.get("maintenance_tips")
+        if not isinstance(guidance, list):
+            guidance = []
+        if not isinstance(maintenance, list):
+            maintenance = []
+
+        return {
+            "provider": "gemini",
+            "model": model,
+            "is_field_image": bool(content_json.get("is_field_image")),
+            "object_type": str(content_json.get("object_type", "unknown")),
+            "confidence": float(content_json.get("confidence", 0.0)),
+            "summary": str(content_json.get("summary", "")),
+            "farmer_guidance": [str(item) for item in guidance],
+            "maintenance_tips": [str(item) for item in maintenance],
+            "raw": None,
+        }
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError, ValueError):
+        fallback = _fallback_ai_analysis(
+            mathematical_analysis,
+            camera_number,
+            field_zone,
+            latitude,
+            longitude,
+        )
+        fallback["provider"] = "gemini-fallback"
+        fallback["model"] = model
+        return fallback
+
+
 def analyze_image(
     file: BinaryIO,
     request_lat: float | str | None,
@@ -350,7 +594,10 @@ def analyze_image(
     ndvi_map, index_method = calculate_ndvi(image)
     class_map, ratios = run_kmeans(ndvi_map)
     overlay = create_overlay(image, ndvi_map, index_method)
-    overlay_image_url = upload_to_supabase(overlay)
+    try:
+        overlay_image_url = upload_to_supabase(overlay)
+    except ValidationError:
+        overlay_image_url = save_image_locally(overlay, "overlays")
 
     # Weighted score: green contributes most, yellow partially, red none.
     vegetation_ratio = ratios["green_ratio"] + (0.5 * ratios["yellow_ratio"])
@@ -378,4 +625,135 @@ def analyze_image(
         "latitude": latitude,
         "longitude": longitude,
         "overlay_image_url": overlay_image_url,
+    }
+
+
+def synthesize_report_tts(
+    text: str,
+    *,
+    voice_id: int = 147320,
+    language: str = "en-us",
+    speech_model: str = "mars-flash",
+    output_format: str = "mp3",
+) -> dict[str, Any]:
+    cleaned_text = str(text).strip()
+    if len(cleaned_text) < 3:
+        raise ValidationError("Text must be at least 3 characters for TTS.")
+
+    api_key = _get_env_value("CAMB_API_KEY")
+    if not api_key:
+        raise ValidationError("CAMB_API_KEY is not configured.")
+
+    sdk_style_available = (
+        CambSDKClient is not None
+        and save_stream_to_file is not None
+        and StreamTtsOutputConfiguration is not None
+    )
+
+    if not sdk_style_available and CambAIClient is None:
+        raise ValidationError("CAMB SDK is not installed (install `cambai` or `camb-ai`).")
+
+    normalized_format = str(output_format).strip().lower() or "mp3"
+    if normalized_format not in {"mp3", "wav", "pcm_s16le"}:
+        normalized_format = "mp3"
+
+    audio_bytes: bytes
+
+    if sdk_style_available:
+        client = CambSDKClient(api_key=api_key)
+        stream = client.text_to_speech.tts(
+            text=cleaned_text,
+            voice_id=int(voice_id),
+            language=language,
+            speech_model=speech_model,
+            output_configuration=StreamTtsOutputConfiguration(format=normalized_format),
+        )
+
+        suffix = ".wav" if normalized_format == "wav" else ".mp3"
+        if normalized_format == "pcm_s16le":
+            suffix = ".pcm"
+
+        fd, temp_path = tempfile.mkstemp(prefix="cropsight_tts_", suffix=suffix)
+        os.close(fd)
+
+        try:
+            save_stream_to_file(stream, temp_path)
+            with open(temp_path, "rb") as file_obj:
+                audio_bytes = file_obj.read()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    else:
+        # Fallback for currently installable 'cambai' package.
+        # It writes a wav file to output_directory using task polling APIs.
+        language_id = 1
+        normalized_lang = language.strip().lower()
+        if normalized_lang.startswith("en"):
+            language_id = 1
+
+        client = CambAIClient(api_key=api_key)
+        task_info = client.create_tts(
+            text=cleaned_text,
+            voice_id=int(voice_id),
+            language=language_id,
+        )
+        task_id = str(task_info.get("task_id", "")).strip()
+        if not task_id:
+            raise ValidationError("CAMB TTS did not return a task_id.")
+
+        run_id: int | None = task_info.get("run_id")
+        max_attempts = 15
+        for _ in range(max_attempts):
+            status_info = client.get_tts_status(task_id)
+            status_value = str(status_info.get("status", "")).upper()
+            run_id = status_info.get("run_id") or run_id
+
+            if status_value == "SUCCESS" and run_id is not None:
+                break
+            if status_value in {"ERROR", "TIMEOUT", "PAYMENT_REQUIRED"}:
+                reason = status_info.get("exception_reason")
+                raise ValidationError(
+                    f"CAMB TTS task failed with status {status_value}. {reason or ''}".strip()
+                )
+
+            import time
+
+            time.sleep(2)
+
+        if run_id is None:
+            raise ValidationError("CAMB TTS timed out before returning run_id.")
+
+        temp_dir = tempfile.mkdtemp(prefix="cropsight_tts_")
+        temp_path = os.path.join(temp_dir, f"tts_stream_{run_id}.wav")
+
+        try:
+            client.get_tts_result(int(run_id), output_directory=temp_dir)
+            if not os.path.exists(temp_path):
+                raise ValidationError("CAMB TTS result file was not generated.")
+
+            with open(temp_path, "rb") as file_obj:
+                audio_bytes = file_obj.read()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            if os.path.isdir(temp_dir):
+                os.rmdir(temp_dir)
+
+        # cambai fallback currently returns wav stream.
+        normalized_format = "wav"
+
+    mime_type = "audio/mpeg"
+    if normalized_format == "wav":
+        mime_type = "audio/wav"
+    if normalized_format == "pcm_s16le":
+        mime_type = "audio/L16"
+
+    return {
+        "provider": "camb-ai",
+        "voice_id": int(voice_id),
+        "language": language,
+        "speech_model": speech_model,
+        "format": normalized_format,
+        "mime_type": mime_type,
+        "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
     }

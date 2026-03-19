@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
@@ -31,6 +33,7 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
+APPEND_SLASH = True
 
 ROOT_URLCONF = "cropsight_backend.urls"
 
@@ -52,12 +55,17 @@ TEMPLATES = [
 WSGI_APPLICATION = "cropsight_backend.wsgi.application"
 ASGI_APPLICATION = "cropsight_backend.asgi.application"
 
+# Django system tables still use SQLite locally.
+# Application data (users, images, analysis) is stored in MongoDB via analyzer/mongo.py.
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
     }
 }
+
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://127.0.0.1:27017")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "cropsight")
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -72,5 +80,9 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+
+# Media files (uploaded images)
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

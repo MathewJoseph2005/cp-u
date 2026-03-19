@@ -1,10 +1,16 @@
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
+import { buildApiUrl } from "../lib/api";
 
-export default function NodeSimulator({ user, onClose = () => {} }) {
+export default function NodeSimulator({
+  user,
+  onClose = () => {},
+  onFrameSaved = () => {},
+}) {
   const [cameraNumber, setCameraNumber] = useState("1");
   const [isActive, setIsActive] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
+  const [lastSavedRecord, setLastSavedRecord] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("idle"); // idle, uploading, success, error
   const [statusMessage, setStatusMessage] = useState("");
   const [deviceSupport, setDeviceSupport] = useState(true);
@@ -108,17 +114,25 @@ export default function NodeSimulator({ user, onClose = () => {} }) {
             formData.append("name", user.name);
             formData.append("phone", user.phone);
 
-            // POST to /api/analyze/ endpoint
-            // Using relative path so it works with both localhost and IP addresses
-            const response = await axios.post("/api/analyze/", formData, {
+            // POST to backend analyze endpoint
+            const response = await axios.post(buildApiUrl("/api/analyze/"), formData, {
               headers: { "Content-Type": "multipart/form-data" },
               timeout: 30000, // 30 second timeout
             });
 
             if (response.status === 200 || response.status === 201) {
+              const savedRecord = response?.data;
+
               setConnectionStatus("success");
               setLastSynced(new Date());
-              setStatusMessage("✓ Frame uploaded successfully");
+              setLastSavedRecord(savedRecord ?? null);
+              setStatusMessage(
+                `✓ Frame uploaded and saved to Camera ${cameraNumber} grid`
+              );
+
+              if (savedRecord && typeof savedRecord === "object") {
+                onFrameSaved(savedRecord);
+              }
 
               // Reset success message after 2 seconds
               setTimeout(() => {
@@ -307,6 +321,26 @@ export default function NodeSimulator({ user, onClose = () => {} }) {
         >
           {isActive ? "🛑 Stop Live Feed" : "▶ Start Live Feed"}
         </button>
+
+        <button
+          type="button"
+          onClick={captureAndUpload}
+          disabled={!isActive || connectionStatus === "uploading"}
+          className="mt-3 w-full max-w-sm px-6 py-3 rounded-lg font-semibold text-base transition bg-sky-600 hover:bg-sky-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          📸 Capture And Send Now
+        </button>
+
+        {lastSavedRecord ? (
+          <div className="w-full max-w-sm mt-3 px-4 py-3 bg-emerald-900/20 border border-emerald-700 rounded-lg text-emerald-200 text-sm">
+            <p className="font-semibold">Saved To Camera Grid</p>
+            <p>
+              Camera {lastSavedRecord.camera_number ?? cameraNumber}
+              {lastSavedRecord.field_zone ? ` (${lastSavedRecord.field_zone})` : ""}
+            </p>
+            <p>Health Score: {lastSavedRecord.health_score ?? "N/A"}</p>
+          </div>
+        ) : null}
 
         {/* Error Display */}
         {error && (

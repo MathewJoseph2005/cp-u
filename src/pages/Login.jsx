@@ -1,13 +1,21 @@
-import { useState, useContext } from "react";
+import { useState, useContext, useEffect } from "react";
 import { AuthContext } from "../context/AuthContext";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { buildApiUrl } from "../lib/api";
 
 export default function Login() {
-  const { login } = useContext(AuthContext);
+  const { login, user } = useContext(AuthContext);
+  const navigate = useNavigate();
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      navigate("/", { replace: true });
+    }
+  }, [user, navigate]);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -26,7 +34,7 @@ export default function Login() {
     setLoading(true);
     
     try {
-      const response = await fetch("/api/login/", {
+      const response = await fetch(buildApiUrl("/api/login/"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -41,6 +49,7 @@ export default function Login() {
 
       if (response.ok) {
         login(data);
+        navigate("/", { replace: true });
       } else {
         setError(data.detail || "Login failed. Please check your credentials.");
       }
