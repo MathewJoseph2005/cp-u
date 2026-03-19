@@ -33,6 +33,7 @@ class AnalyzeRequestSerializer(serializers.Serializer):
     phone = serializers.CharField(required=True, max_length=32)
     latitude = serializers.FloatField(required=False, allow_null=True)
     longitude = serializers.FloatField(required=False, allow_null=True)
+    camera_number = serializers.IntegerField(required=False, allow_null=True, min_value=1)
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         latitude = attrs.get("latitude")
@@ -63,6 +64,8 @@ class AnalysisResultSerializer(serializers.ModelSerializer):
             "actions",
             "latitude",
             "longitude",
+            "camera_number",
+            "field_zone",
             "overlay_image_url",
             "original_image_url",
             "created_at",

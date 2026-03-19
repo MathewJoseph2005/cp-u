@@ -1,9 +1,10 @@
 from django.urls import path
 
-from .views import AnalyzeView, LoginView, RegisterView
+from .views import AnalyzeBatchView, AnalyzeView, LoginView, RegisterView
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
     path("login/", LoginView.as_view(), name="login"),
+    path("analyze/batch/", AnalyzeBatchView.as_view(), name="analyze-batch"),
     path("analyze/", AnalyzeView.as_view(), name="analyze"),
 ]

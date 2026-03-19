@@ -44,10 +44,17 @@ export default function FarmMap({
   setAnalysisResults,
   selectedMarker,
   setSelectedMarker,
+  mapHeightClassName = "h-[500px]",
+  onRecordSelect,
+  autoFetch = true,
 }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!autoFetch) {
+      return undefined;
+    }
+
     let mounted = true;
 
     async function loadResults() {
@@ -69,7 +76,7 @@ export default function FarmMap({
     return () => {
       mounted = false;
     };
-  }, [setAnalysisResults]);
+  }, [autoFetch, setAnalysisResults]);
 
   const validResults = useMemo(
     () =>
@@ -91,7 +98,7 @@ export default function FarmMap({
   }, [validResults]);
 
   return (
-    <div className="w-full h-[500px] rounded-xl overflow-hidden border border-slate-200">
+    <div className={`w-full ${mapHeightClassName} rounded-xl overflow-hidden border border-slate-200`}>
       {error ? <p className="p-3 text-sm text-red-600 bg-red-50">{error}</p> : null}
       <MapContainer center={center} zoom={5} className="w-full h-full">
         <TileLayer
@@ -105,7 +112,12 @@ export default function FarmMap({
             position={[record.latitude, record.longitude]}
             icon={getMarkerIcon(record.health_score ?? 0)}
             eventHandlers={{
-              click: () => setSelectedMarker(record),
+              click: () => {
+                setSelectedMarker(record);
+                if (onRecordSelect) {
+                  onRecordSelect(record);
+                }
+              },
             }}
           >
             <Popup>
