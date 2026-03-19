@@ -33,6 +33,13 @@ export default function AnalysisModal({ record, onClose }) {
     ? aiAnalysis.maintenance_tips
     : [];
 
+  const isSkippedReport = record.actions?.analysis_status === "skipped_non_field";
+  const aiFieldStatusText = aiAnalysis?.is_field_image === true
+    ? "Field image"
+    : aiAnalysis?.is_field_image === false
+      ? "Not a field image"
+      : "Unknown";
+
   const reportNarrationText = useMemo(() => {
     const summaryParts = [];
     summaryParts.push(`Analysis report for ${locationTitle}.`);
@@ -50,11 +57,11 @@ export default function AnalysisModal({ record, onClose }) {
       summaryParts.push(`AI summary: ${aiAnalysis.summary}.`);
     }
 
-    if (aiGuidance.length) {
+    if (!isSkippedReport && aiGuidance.length) {
       summaryParts.push(`AI guidance: ${aiGuidance.join(". ")}.`);
     }
 
-    if (aiMaintenance.length) {
+    if (!isSkippedReport && aiMaintenance.length) {
       summaryParts.push(`Maintenance tips: ${aiMaintenance.join(". ")}.`);
     }
 
@@ -67,6 +74,7 @@ export default function AnalysisModal({ record, onClose }) {
     aiAnalysis?.summary,
     aiGuidance,
     aiMaintenance,
+    isSkippedReport,
   ]);
 
   async function handleReadReport() {
@@ -160,23 +168,58 @@ export default function AnalysisModal({ record, onClose }) {
 
         <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div>
-            {record.overlay_image_url ? (
-              <img
-                src={record.overlay_image_url}
-                alt="Analyzed overlay"
-                className="w-full h-[320px] object-cover rounded-lg border border-slate-200"
-              />
-            ) : (
-              <div className="w-full h-[320px] rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center text-slate-500 text-sm">
-                No overlay image available
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Preview Image</p>
+                {record.original_image_url ? (
+                  <img
+                    src={record.original_image_url}
+                    alt="Original preview"
+                    className="w-full h-[320px] object-cover rounded-lg border border-slate-200"
+                  />
+                ) : (
+                  <div className="w-full h-[320px] rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center text-slate-500 text-sm">
+                    No preview image available
+                  </div>
+                )}
               </div>
-            )}
+
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Analyzed Image</p>
+                {record.overlay_image_url ? (
+                  <img
+                    src={record.overlay_image_url}
+                    alt="Analyzed overlay"
+                    className="w-full h-[320px] object-cover rounded-lg border border-slate-200"
+                  />
+                ) : (
+                  <div className="w-full h-[320px] rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center text-slate-500 text-sm">
+                    No analyzed image available
+                  </div>
+                )}
+
+                {isSkippedReport ? (
+                  <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                    Analysis was skipped; analyzed image preview mirrors the original capture.
+                  </p>
+                ) : null}
+              </div>
+            </div>
           </div>
 
           <div className="space-y-4">
             <div className="rounded-lg border border-slate-200 p-4 bg-slate-50">
               <p className="text-xs uppercase tracking-wide text-slate-500">Health Score</p>
-              <p className="text-3xl font-bold text-slate-900">{record.health_score}</p>
+              <p className="text-3xl font-bold text-slate-900">{record.health_score ?? "N/A"}</p>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 p-4 bg-white space-y-2">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Essential Info</p>
+              <p className="text-sm text-slate-700"><span className="font-semibold text-slate-900">Report Type:</span> {isSkippedReport ? "Skipped (Non-field image)" : "Field analysis"}</p>
+              <p className="text-sm text-slate-700"><span className="font-semibold text-slate-900">AI Field Check:</span> {aiFieldStatusText}</p>
+              {aiAnalysis?.summary ? (
+                <p className="text-sm text-slate-700"><span className="font-semibold text-slate-900">AI Summary:</span> {aiAnalysis.summary}</p>
+              ) : null}
             </div>
 
             <div>
@@ -198,7 +241,7 @@ export default function AnalysisModal({ record, onClose }) {
               </div>
             ) : null}
 
-            {aiAnalysis ? (
+            {aiAnalysis && !isSkippedReport ? (
               <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-2">
                 <p className="text-sm font-semibold text-blue-900">
                   AI Field Check: {aiAnalysis.is_field_image === true ? "Field image" : aiAnalysis.is_field_image === false ? "Not a field image" : "Unknown"}

@@ -15,6 +15,7 @@ from .mongo import get_collections, serialize_result, serialize_user
 from .serializers import AnalyzeRequestSerializer, LoginSerializer
 from .services import (
     analyze_image,
+    estimate_field_likelihood,
     generate_grok_ai_analysis,
     read_image,
     save_image_locally,
@@ -33,6 +34,62 @@ CAMERA_ZONE_MAP: dict[int, str] = {
     8: "South-Center Zone",
     9: "South-East Zone",
 }
+
+
+def build_skipped_actions(ai_summary: str | None) -> dict[str, Any]:
+    message = "Analysis skipped because the uploaded image was not identified as an agricultural field."
+    if ai_summary and ai_summary.strip():
+        message = f"{message} AI note: {ai_summary.strip()}"
+
+    return {
+        "recommendation": message,
+        "analysis_status": "skipped_non_field",
+    }
+
+
+def should_run_field_analysis(ai_analysis: dict[str, Any], image_bytes: bytes) -> tuple[bool, dict[str, Any]]:
+    ai_is_field = ai_analysis.get("is_field_image")
+    ai_conf_raw = ai_analysis.get("confidence")
+    try:
+        ai_confidence = float(ai_conf_raw)
+    except (TypeError, ValueError):
+        ai_confidence = 0.0
+
+    object_type = str(ai_analysis.get("object_type", "")).strip().lower()
+    heuristic = estimate_field_likelihood(image_bytes)
+    heuristic_likely = bool(heuristic.get("likely_field"))
+
+    object_type_field_hints = {
+        "crop_field",
+        "field",
+        "farm",
+        "agricultural_field",
+        "agriculture",
+        "farmland",
+    }
+
+    if ai_is_field is True:
+        decision = True
+        reason = "ai_true"
+    elif ai_is_field is False:
+        # Skip only when AI is strongly confident and heuristic does not look like a field.
+        strong_non_field = ai_confidence >= 0.75 and not heuristic_likely
+        decision = not strong_non_field
+        reason = "ai_false_strong_non_field" if not decision else "ai_false_not_strong_enough"
+    else:
+        # Unknown/None AI output should default to analyze to avoid false skips.
+        decision = True
+        reason = "ai_unknown_default_analyze"
+
+    gate_meta = {
+        "decision": "analyze" if decision else "skip",
+        "reason": reason,
+        "ai_is_field_image": ai_is_field,
+        "ai_confidence": round(ai_confidence, 4),
+        "ai_object_type": object_type or "unknown",
+        "heuristic": heuristic,
+    }
+    return decision, gate_meta
 
 
 def normalize_phone(value: str) -> str:
@@ -182,6 +239,42 @@ class AnalyzeView(APIView):
                 }
             )
 
+            ai_analysis = generate_grok_ai_analysis(
+                image_bytes=image_bytes,
+                mathematical_analysis={
+                    "health_score": 0,
+                    "actions": {},
+                },
+                camera_number=camera_number,
+                field_zone=field_zone,
+                latitude=latitude,
+                longitude=longitude,
+            )
+
+            should_analyze, gate_meta = should_run_field_analysis(ai_analysis, image_bytes)
+            ai_analysis["field_gate"] = gate_meta
+
+            if not should_analyze:
+                result_doc = {
+                    "image_id": image_insert.inserted_id,
+                    "user_id": user_doc.get("_id") if user_doc else None,
+                    "user_phone": phone,
+                    "health_score": None,
+                    "actions": build_skipped_actions(ai_analysis.get("summary")),
+                    "ai_analysis": ai_analysis,
+                    "latitude": latitude if (camera_number is None and explicit_gps_provided) else None,
+                    "longitude": longitude if (camera_number is None and explicit_gps_provided) else None,
+                    "camera_number": camera_number,
+                    "field_zone": field_zone,
+                    "overlay_image_url": original_image_url,
+                    "original_image_url": original_image_url,
+                    "created_at": datetime.now(timezone.utc),
+                }
+
+                inserted = analysis_results.insert_one(result_doc)
+                created_doc = analysis_results.find_one({"_id": inserted.inserted_id})
+                return Response(serialize_result(created_doc or result_doc), status=status.HTTP_201_CREATED)
+
             analysis_data = analyze_image(
                 image_file,
                 latitude,
@@ -192,17 +285,7 @@ class AnalyzeView(APIView):
             result_latitude = analysis_data["latitude"] if (camera_number is None and explicit_gps_provided) else None
             result_longitude = analysis_data["longitude"] if (camera_number is None and explicit_gps_provided) else None
 
-            ai_analysis = generate_grok_ai_analysis(
-                image_bytes=image_bytes,
-                mathematical_analysis={
-                    "health_score": analysis_data.get("health_score"),
-                    "actions": analysis_data.get("actions") or {},
-                },
-                camera_number=camera_number,
-                field_zone=field_zone,
-                latitude=result_latitude,
-                longitude=result_longitude,
-            )
+            ai_analysis["field_analysis_applied"] = True
 
             result_doc = {
                 "image_id": image_insert.inserted_id,
@@ -304,24 +387,50 @@ class AnalyzeBatchView(APIView):
                     }
                 )
 
-                analysis_data = analyze_image(
-                    image_file,
-                    request_lat=None,
-                    request_lon=None,
-                    require_location=False,
-                )
-
                 ai_analysis = generate_grok_ai_analysis(
                     image_bytes=image_bytes,
                     mathematical_analysis={
-                        "health_score": analysis_data.get("health_score"),
-                        "actions": analysis_data.get("actions") or {},
+                        "health_score": 0,
+                        "actions": {},
                     },
                     camera_number=camera_number,
                     field_zone=field_zone,
                     latitude=None,
                     longitude=None,
                 )
+
+                should_analyze, gate_meta = should_run_field_analysis(ai_analysis, image_bytes)
+                ai_analysis["field_gate"] = gate_meta
+
+                if not should_analyze:
+                    result_doc = {
+                        "image_id": image_insert.inserted_id,
+                        "user_id": user_doc.get("_id") if user_doc else None,
+                        "user_phone": phone,
+                        "health_score": None,
+                        "actions": build_skipped_actions(ai_analysis.get("summary")),
+                        "ai_analysis": ai_analysis,
+                        "latitude": None,
+                        "longitude": None,
+                        "camera_number": camera_number,
+                        "field_zone": field_zone,
+                        "overlay_image_url": original_image_url,
+                        "original_image_url": original_image_url,
+                        "created_at": datetime.now(timezone.utc),
+                    }
+
+                    inserted = analysis_results.insert_one(result_doc)
+                    created_doc = analysis_results.find_one({"_id": inserted.inserted_id})
+                    results.append(serialize_result(created_doc or result_doc))
+                    continue
+
+                analysis_data = analyze_image(
+                    image_file,
+                    request_lat=None,
+                    request_lon=None,
+                    require_location=False,
+                )
+                ai_analysis["field_analysis_applied"] = True
 
                 result_doc = {
                     "image_id": image_insert.inserted_id,

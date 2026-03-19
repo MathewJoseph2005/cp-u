@@ -409,14 +409,11 @@ def _fallback_ai_analysis(
     health_score = int(mathematical_analysis.get("health_score", 0))
     guidance, maintenance, summary = _default_farmer_tips(health_score)
 
-    if camera_number is not None or field_zone or (latitude is not None and longitude is not None):
-        object_type = "crop_field"
-        is_field_image = True
-        confidence = 0.55
-    else:
-        object_type = "unknown"
-        is_field_image = None
-        confidence = 0.2
+    # Do not auto-accept as field using camera metadata alone.
+    # Field detection must come from the AI model response.
+    object_type = "unknown"
+    is_field_image = None
+    confidence = 0.2
 
     return {
         "provider": "local-fallback",
@@ -456,6 +453,78 @@ def _get_env_value(*names: str) -> str:
         if value and value.strip():
             return value.strip()
     return ""
+
+
+def _coerce_is_field_image(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1", "field", "crop_field"}:
+            return True
+        if normalized in {"false", "no", "n", "0", "non-field", "non_field", "not_field", "unknown", "none", "null", ""}:
+            return False if normalized in {"false", "no", "n", "0", "non-field", "non_field", "not_field"} else None
+
+    return None
+
+
+def estimate_field_likelihood(image_bytes: bytes) -> dict[str, float | bool]:
+    """
+    Lightweight visual heuristic for field detection.
+    Used as a safety fallback when AI response is uncertain.
+    """
+    try:
+        buffer = np.frombuffer(image_bytes, dtype=np.uint8)
+        image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            return {
+                "likely_field": False,
+                "green_ratio": 0.0,
+                "soil_ratio": 0.0,
+                "field_score": 0.0,
+            }
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Vegetation-ish hues.
+        green_mask = cv2.inRange(hsv, np.array([25, 35, 25]), np.array([95, 255, 255]))
+
+        # Soil-ish hues (brown/yellow-dirt range).
+        soil_mask_1 = cv2.inRange(hsv, np.array([5, 30, 20]), np.array([25, 255, 220]))
+        soil_mask_2 = cv2.inRange(hsv, np.array([0, 20, 10]), np.array([10, 200, 180]))
+        soil_mask = cv2.bitwise_or(soil_mask_1, soil_mask_2)
+
+        total_pixels = float(image.shape[0] * image.shape[1])
+        green_ratio = float(np.count_nonzero(green_mask)) / max(total_pixels, 1.0)
+        soil_ratio = float(np.count_nonzero(soil_mask)) / max(total_pixels, 1.0)
+
+        # Encourage mixed green + soil patterns common in fields.
+        field_score = (green_ratio * 0.75) + (soil_ratio * 0.35)
+        likely_field = bool(
+            (green_ratio >= 0.12 and (green_ratio + soil_ratio) >= 0.22)
+            or field_score >= 0.20
+        )
+
+        return {
+            "likely_field": likely_field,
+            "green_ratio": round(green_ratio, 4),
+            "soil_ratio": round(soil_ratio, 4),
+            "field_score": round(field_score, 4),
+        }
+    except Exception:
+        return {
+            "likely_field": False,
+            "green_ratio": 0.0,
+            "soil_ratio": 0.0,
+            "field_score": 0.0,
+        }
 
 
 def generate_grok_ai_analysis(
@@ -556,7 +625,7 @@ def generate_grok_ai_analysis(
         return {
             "provider": "gemini",
             "model": model,
-            "is_field_image": bool(content_json.get("is_field_image")),
+            "is_field_image": _coerce_is_field_image(content_json.get("is_field_image")),
             "object_type": str(content_json.get("object_type", "unknown")),
             "confidence": float(content_json.get("confidence", 0.0)),
             "summary": str(content_json.get("summary", "")),
