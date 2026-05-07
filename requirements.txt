@@ -1,0 +1,21 @@
+Django>=5.0,<6.0
+<<<<<<< HEAD
+djangorestframework>=3.15.0,<4.0
+supabase>=2.4.0,<3.0
+opencv-python>=4.9.0,<5.0
+numpy>=1.26.0,<3.0
+scikit-learn>=1.4.0,<2.0
+Pillow>=10.0.0,<12.0
+dj-database-url>=2.1.0,<3.0
+psycopg2-binary>=2.9.0,<3.0
+python-dotenv>=1.0.0,<2.0
+=======
+djangorestframework>=3.15,<4.0
+opencv-python>=4.10,<5.0
+numpy>=1.26,<3.0
+Pillow>=10.0,<12.0
+django-cors-headers
+python-dotenv>=1.0,<2.0
+pymongo>=4.8,<5.0
+cambai>=0.1.8,<1.0
+>>>>>>> 08430856d59c2322acb2d319a146251f0b5a370d

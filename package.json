@@ -1,0 +1,49 @@
+{
+<<<<<<< HEAD
+  "name": "cropsight-dashboard",
+  "private": true,
+  "version": "0.1.0",
+=======
+  "name": "cropsight-frontend",
+  "private": true,
+  "version": "1.0.0",
+>>>>>>> 08430856d59c2322acb2d319a146251f0b5a370d
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+<<<<<<< HEAD
+    "@supabase/supabase-js": "^2.52.0",
+    "axios": "^1.9.0",
+    "leaflet": "^1.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.16",
+    "@vitejs/plugin-react": "^4.5.0",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "vite": "^5.4.18"
+=======
+    "axios": "^1.8.4",
+    "leaflet": "^1.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1",
+    "react-router-dom": "^7.13.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "vite": "^5.4.12"
+>>>>>>> 08430856d59c2322acb2d319a146251f0b5a370d
+  }
+}
